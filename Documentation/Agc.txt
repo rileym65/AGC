@@ -1,0 +1,528 @@
+AGC
+
+Apollo Guidance Computer
+
+
+  This simulator is not meant to simulate the AGC as it was used on Apollo,
+Therefore this simulation does not include any of the other Apollo hardware
+that was connected to the AGC, nor does it include any of the flight software.
+For those interested in how the AGC was used on Apollo there is an excellent
+simulator (including flight software) at the Virtual AGC project:
+(http://www.ibiblio.org/apollo/)
+
+
+  The AGC was one of the earliest computers to be built using integrated
+circuit (IC) technology.  As a result a lot of computing power was packed
+into a case measuring only 24 x 12.5 x 6.5 inches, weighing around 70 pounds.
+The AGC consisted of 2048 words of erasable (RAM) memory and 36864 words of
+fixed (ROM) each of which contained 16 bits.  The AGC operated at a clock
+frequency of 2.048mhz.
+
+  This simulator is meant to allow you to explore how this particular computer
+worked and what could be done with it besides flying to the moon.  This
+program simulates the block II AGC as well as the DSKY that was the user
+interface to the AGC.  The simulator includes an integrated assembler to help
+the user in writing software for this machine.
+
+
+Number Format
+=============
+  Numbers used in the AGC are 1's compliment.  A positive number has its sign
+bit set to 0 and then the remaining bits represent the binary value.  A
+negative number has its sign bit set to 1 and the remaining bits are the 
+opposite of their binary value.  Due to the way that the AGC stores numbers,
+both a +0 and -0 are possbile.  Here are some samples:
+
++1 = 0 00000000000001
+-1 = 1 11111111111110
++5 = 0 00000000000101
+-5 = 1 11111111111010
++0 = 0 00000000000000
+-0 = 1 11111111111111
+
+  When adding like numbers with opposite signs, the result will be a 
+negative 0, for example:  +5 - 5 = -0
+
+  Decrementing +1 will result in +0, decrementing +0 will result in -1.
+
+  Incrementing -1 will result in -0, incrementing -0 will result in +1.
+
+  Another important difference is how overflow is handled.  In regular 2's
+compliment, the highest positive number when incremented ends up the largest
+negative number.  Overflow in the AGC is different.  The highest positive
+number will overflow to produce +0, while the largest negative number will
+underflow to -0.  In other words, no positive number due to overflow will
+ever be negative, and no negative number due to underflow will ever result
+in a positive number.
+
+Data Format
+===========
+  Although each memory word was 16 bits, only 15 were actually visible to
+the programmer, the 16th bit was used by the hardware for parity checking.
+The AGC used two number formats, single and double precision.  Single 
+precision numbers used a single word of memory and consisted of a sign and
+14 bits for the value, while double precision used two consecutive memory
+words, stored high word first.  An important thing to note about double
+precision numbers is that both words of the number have their own sign and
+contribute 14 bits to the value.  Normally the sign of the high word held the
+sign for the whole number and the sign of the second word would agree with it,
+but that was not a requirement, it is actually possible to have the second
+sign be opposite in which case the number would be a bit different from what
+you expect.  The formula for the final number would be:
+
+  (high word) * 16384 + (low word)
+
+  If the sign of the low word is positive, then it adds to the toal number,
+while if it is negative it subtracts, here are a couple exmaples:
+
+  High word         Low word              Final value
+  0 00000000000001  0 000000000000001     16385  (+16384 + 1)
+  0 00000000000001  1 111111111111110     16383  (+16384 - 1)
+
+
+Special Cases
+=============
+  While memory uses 15 bit words and most registers are also 15 bits, there
+are 2 registers that are 16 bits, A and L.  Both the A and L registers are
+16 bits each and special handling occurs when moving 15 bit values in either
+of these registers.  Special handling also occurs of either of these two
+registers is stored in a 15 bit location.
+
+  When loading A or L from a 15 bit source then the value will be sign 
+extended into the 16th bit.  This is done by taking the 15th bit and placing
+it in the 16th bit.  Here are some samples:
+
+  0 10000000000110  ->  00 10000000000110
+  1 01111111111010  ->  11 01111111111010
+
+  Arithmetic can actually cause a change in the sign bits.  For example:
+
+  00 11111111111111 + 1 becomes 01 00000000000000
+  11 00000000000000 - 1 becomes 10 11111111111111
+  00 00000000000000 - 1 becomes 11 11111111111110
+  11 11111111111111 + 1 becomes 00 00000000000001
+
+  When after an arithmetic operation, the 15th and 16th bits no longer agree,
+as in the above examples, this signals that an overflow has occured.  
+Instructions that test for overflow are actually comparing the 15th and 16th
+bits of the accumulator to see if they are different, if they are then
+overflow has occurred.
+
+  When the value of A or L is written to any 15 bit location then the value
+will be overflow corrected when it is written back.  The 16th bit is assumed
+to be the correct sign and will be placed in the 15th bit position when the
+number is stored.  For example:
+
+  01 00000000000000 is stored as 0 00000000000000
+  10 11111111111111 is stores as 1 11111111111111
+
+
+Registers
+=========
+  The AGC contained 48 registers that were mapped into the erasable memory
+space, as such they represent the first 48 words of memory.  Many of the
+registers were connected to various equipment on Apollo and are not
+simulated here.  The simulator recognizes the 26 registers listed here:
+
+Reg     Size    Name    Notes
+  0     16      A       The Accumulator
+  1     16      L       Low word for double operations
+  2     16      Q       Stores return address
+  3     15      EB      Erasable bank register. 000 0EEE 0000 0000
+  4     15      FB      Fixed bank registers.   FFF FF00 0000 0000
+  5     15      Z       Program counter
+  6     15      BB      Both banks register     FFF FF00 0000 0EEE
+  7     15      ZERO    Hardwired to zero
+  8     15      ARUPT   Location where A can be saved during interrupts
+  9     15      LRUPT   Location where L can be saved during interrupts
+ 10     15      QRUPT   Location where Q can be saved during interrupts
+ 13     15      ZRUPT   Holds Z when interrupt occurs
+ 14     15      BBRUPT  Location where BB can be saved during interrupts
+ 15     15      BRUPT   Where next instruction is saved during interrupts
+ 16     15      CYR     Cycle right register, cycles right upon writing
+ 17     15      SR      Shift Right register.  Shifts right upon writing
+ 18     15      CYL     Cycle Left register, cycles left upon writing
+ 19     15      EDOP    Shift right 7 places upon writing
+ 20     15      TIME2   High 14 bits of system timer
+ 21     15      TIME1   Low 14 bits of system timer
+ 22     15      TIME3   Timer incremented every 10ms
+ 23     15      TIME4   Timer incremented every 10ms
+ 24     15      TIME5   Timer incremented every 10ms
+ 25     15      TIME6   Timer decremented every 1/1600sec when enabled
+
+
+Interrupt table:
+================
+  There are 11 interrupts possible on the AGC, of these, only the interrupts
+listed in the table below are produced by this simulator.  No special handling
+needs to be done for any other interrupts.
+
+Octal   Hex     Name    Description
+4000    800     (boot)  Where program execution begins upon reset
+4004    804     T6RUPT  When TIME6 decremented to 0
+4010    808     T5RUPT  When TIME5 overflows
+4014    80c     T3RUPT  When TIME3 overflows
+4020    810     T4RUPT  When TIME4 overflows
+4024    814     KEYRUPT When key pressed on DSKY
+
+  It is important to note that interrupts are enabled upon reset, therefore
+you should either handle all the above interrupts with either a RESUME
+instruction at the interrupt vector or have a valid interrupt handler.  If
+you do not intend to use any interrupts then you could just execute an INHINT
+instruction as the first instruction in your program.
+
+  Interrupt processing is delayed under any of the following conditions:
+    1. The extracode flag is set
+    2. A or L contains overflow/underflow
+    3. An interrupt service routine is currently running
+
+
+Normal instructions:
+====================
+  The following instructions are base instructions which must not be preceeded
+by an EXTEND instruction.
+
+AD k       0110 kkkk kkkk kkkk       Add memory to A
+ADS k      0010 11kk kkkk kkkk       Add A and memory to both A and memory
+CA k       0011 kkkk kkkk kkkk       Clear and add memory to A
+CCS k      0001 00kk kkkk kkkk       Count, compare, and Skip
+                                     [k] > +0, No skip
+                                     [k] = +0, skip 1
+                                     [k] < -0, skip 2
+                                     [k] = -0, skip 3
+COM        0100 0000 0000 0000       Compliment A
+CS k       0100 kkkk kkkk kkkk       Clear and subtract memory from A
+DAS k      0010 00kk kkkk kkkk+1     Double add to storage
+DDOUBL     0010 0000 0000 0001       Double A,L
+DOUBLE     0110 0000 0000 0000       Double A
+DTCB       0101 0100 0000 0110       Transfer changing BB
+DTCF       0101 0100 0000 0101       Transfer changing FB
+DXCH k     0101 01kk kkkk kkkk+1     Double exchange
+EXTEND     0000 0000 0000 0110       Set extracode flag
+INCR k     0010 10kk kkkk kkkk       Increment memory
+INDEX k    0101 00kk kkkk kkkk       Index next instruction
+INHINT     0000 0000 0000 0100       Disable interrupts
+LXCH k     0010 01kk kkkk kkkk       Exchange l with memory
+MASK k     0111 kkkk kkkk kkkk       Mask A by memory
+NOOP       0011 0000 0000 0000       In erasable memory
+           0001 0000 0000 0000       In fixed memory
+OVSK       0101 1000 0000 0000       Overflow skip
+RELINT     0000 0000 0000 0011       Enable interrupts
+RESUME     0101 0000 0000 1111       Resume interrupted program
+RETURN     0000 0000 0000 0010       Return from subroutine
+TC k       0000 kkkk kkkk kkkk       Transfer control
+TCAA       0101 1000 0000 0101       Transfer control to address in A
+TCF k      0001 kkkk kkkk kkkk       Transfer to fixed, 2 high bits cannot be 00
+TS k       0101 10kk kkkk kkkk       Transfer to storage
+                                     if +overflow set A=+1 and skip 1
+                                     if -overflow set A=-1 and skip 1
+XCH k      0101 11kk kkkk kkkk       Exchange A and k
+XLQ        0000 0000 0000 0001       Execute uslin L and Q
+XXALQ      0000 0000 0000 0000       Execute Extracode using A,L, Q
+ZL         0010 0100 0000 0111       Zero L
+
+
+Extended instructions:
+======================
+  The following instructions are extended instructions and require the
+instruction EXTEND to occur before them.  The assembler included with this
+simulator automatically includes the EXTEND opcode before these instructions
+and therefore there is no need for the programmer to include them, If you do
+include EXTEND instructions the assembler will just ignore them and produce
+no code for them.
+
+AUG k      0010 10kk kkkk kkkk       Augement erasable memory
+BZF k      0001 kkkk kkkk kkkk       Branch zero to fized
+BZMF k     0110 kkkk kkkk kkkk       Branch zero or minus to fixed
+DCA k      0011 kkkk kkkk kkkk+1     Double clear and add
+DCOM       0100 0000 0000 0001       Double complement
+DCS k      0100 kkkk kkkk kkk1+1     Double clear and subtract
+DIM k      0010 11kk kkkk kkkk       Diminish
+DV k       0001 00kk kkkk kkkk       Divide
+EDRUPT k   0000 111k kkkk kkkk       Inhibit interrupts
+                                     ZRUPT = Z
+                                     Z = 0
+INDEX k    0101 kkkk kkkk kkkk       Index next instruction
+MP k       0111 kkkk kkkk kkkk       Multiply
+MSU k      0010 00kk kkkk kkkk       Modular Subtract
+QXCH k     0010 01kk kkkk kkkk       Exchange q and memory
+RAND k     0000 010k kkkk kkkk       Read and mask
+READ k     0000 000k kkkk kkkk       Read channel
+ROR k      0000 100k kkkk kkkk       Read and superimpose
+RXOR k     0000 110k kkkk kkkk       Read and xor
+SQUARE     0111 0000 0000 0000       Square A
+SU k       0110 00kk kkkk kkkk       Subtract from A
+WAND k     0000 011k kkkk kkkk       And into io channel
+WOR k      0000 101k kkkk kkkk       Or into io channel
+WRITE k    0000 001k kkkk kkkk       Write io channel
+ZQ         0010 0100 0000 0111       Zero Q
+
+The following commands rewrite k:
+AD, CA, CAE, CAF, CCS, CS, DCA, DCS, SU
+
+
+Instruction encodings:
+======================
+  There are three different encoding schemes used for instructions.  These
+three encoding schemes are as follows:
+
+    CCC KKK KKK KKK KKK
+    CCC QQK KKK KKK KKK
+    CCC PPP KKK KKK KKK
+
+CCC = Code
+QQ  = Quarter code QC
+PPP = Peripheral code PC
+
+
+Opcode Table:
+=============
+Base QC  PC  Code-0 Code-1 Code-2 Code-3 Code-4 Code-5 Code-6 Code-7
++---+---+---+------+------+------+------+------+------+------+------+
+|   | 0 |   |      | CCS  | DAS  |      |      |INDEX |      |      |
+| B |   |   |      +------+------+      |      +------+      |      |
+| A | 1 |   |      |      | LXCH |      |      | DXCH |      |      |
+| S |   |   |  TC  |      +------+  CA  |  CS  +------+  AD  | MASK |
+| E | 2 |   |      | TCF  | INCR |      |      |  TS  |      |      |
+|   |   |   |      |      +------+      |      +------+      |      |
+|   | 3 |   |      |      | ADS  |      |      | XCH  |      |      |
++---+---+---+------+------+------+------+------+------+------+------+
++---+---+---+------+------+------+------+------+------+------+------+
+|   |   | 0 | READ |      |      |      |      |      |      |      |
+|   | 0 +---+------+ DV   | MSU  |      |      |      |  SU  |      |
+| E |   | 1 |WRITE |      |      |      |      |      |      |      |
+| X +---+---+------+------+------+      |      |      +------+      |
+| T |   | 2 | RAND |      |      |      |      |      |      |      |
+| R | 1 +---+------+      | QXCH |      |      |      |      |      |
+| A |   | 3 | WAND |      |      |      |      |      |      |      |
+| C +---+---+------+      +------+ DCA  | DCS  |INDEX |      |  MP  |
+| O |   | 4 | ROR  |      |      |      |      |      |      |      |
+| D | 2 +---+------+ BZF  | AUG  |      |      |      | BZMF |      |
+| E |   | 5 | WOR  |      |      |      |      |      |      |      |
+| S +---+---+------+      +------+      |      |      |      |      |
+|   |   | 6 | RXOR |      |      |      |      |      |      |      |
+|   | 3 +---+------+      | DIM  |      |      |      |      |      |
+|   |   | 7 |EDRUPT|      |      |      |      |      |      |      |
++---+---+---+------+------+------+------+------+------+------+------+
+
+  There are a few instructions that do not fit the above opcode table.  these
+are special encodings of basic instructions that actually act differently.
+
+    RELINT- 00003 TC k with k=00003
+    INHINT- 00004 TC k with k=00004
+    EXTEND- 00006 TC k with k=00006
+    NOOP  - 30000 CA k with k=00000, used only in erasable memory
+    RESUME- 50017 INDEX k with k=00017
+    OVSK  - 54000 TS k with k=00000
+
+
+Pseudo-Operations:
+==================
+  These instructions control how a program is built by the assembler.  None
+of these generate actual executable code, but merely create labels, pointers,
+data, or select where in memory assembly occurs.
+
+label   =       value           - Set label equal to value
+label1  equals  label2          - Set label1 to same address as label2
+        2FCADR  label           - Build constant for use with DTCF
+        2BCADR  label           - Build constant for use with DTCB
+        BANK    [n]             - Select lowest unused space in bank n
+                                  If n is ommited then in current fixed
+                                  bank
+        DEC     n               - Write decimal value n as current byte
+        OCT     n               - Write octal value n as current byte
+        HEX     n               - Write hex value n as current byte
+        2DEC    n               - Write value n as double precision
+        EBANK   [n]             - Set address to lowest unused space in
+                                  erasable bank n.  If n is not given
+                                  then use current erasable bank
+        ERASE   [n]             - Reserve n (or 1 if n not given) memory
+                                  position.
+        SETLOC  addr            - Set assembly point to addr
+        #                       - Begins comment
+
+
+Memory Map:
+===========
+  The memory map of the AGC is a bit convoluted, to say the least!  The initial
+design called for 4k (1k RAM, 3k ROM) of memory and therefore the instruction
+set was designed to use 12-bit addressing which could address all of memory.  
+As time went on and additional demands came along the initial 4k became 
+inadequate and more memory was added to the machine, however, the instruction
+set still only supported 12-bit addresses.  In order to accomodate the 
+additional memory a banking scheme was devised.  The AGC used on Apollo ended
+up having 2k of RAM and 36k of ROM.  The memory was divided into 4 sections as
+ follows:
+
+1. Unswitched-Erasable.  Erasable memory consisted of 8 banks of 256 words 
+   each.  The first 3 banks (0, 1, 2) were permanently mapped to the addresses
+   between 0x000 and 0x2FF.
+
+2. Switched-Erasable.  The memory range from 0x300 to 0x3FF could be mapped
+   to any of the 8 erasable memory banks, including 0, 1, and 2.  In order
+   to map a bank to this range it was necessary to write the bank number to
+   the EB register.  For example, if you wanted to access position 5 in bank
+   4 you would first need to write 0x400 to the EB register then you could 
+   access position 5 at 0x305.
+
+3. Common-Fixed.  Fixed memory consisted of 36 banks of 1024 words each.
+   The memory range from 0x400 to 0x7FF could be mapped to any of the 36 fixed
+   memory banks.  In order to read memory from a fixed memory bank it was
+   necessary to write the bank number to the FB register and then access the
+   memory in the 0x400 to 0x7FF range.  For example.  If you wanted to access
+   position 6 in bank 10 you would need to first write 0x2800 to the FB
+   register and then you could access position 6 at 0x406.  Note that the
+   FB register only allows 5 bits for bank selection, meaning only 32 of the
+   36 banks could be selected this way.  In order to accomodate the additional
+   4 banks a super-bit was added to i/o port 7.  When this bit is set to 0
+   then banks 0-31 could be selected as described above.  In order to access
+   banks 32 through 35 it was first necessary to set the super bit to 1, then
+   bank addresses from 24 through 27 actually selected banks 32 through 35.
+
+4. Fixed-Fixed.  The memory range from 0x800 to 0xFFF was permanently mapped
+   to fixed memory banks 2 and 3.  Bank 2 is mapped from 0x800 through 0xBFF
+   while bank 3 is mapped from 0xC00 through 0xFFF.
+
+Octal     Hex     Decimal   Type                  Notes
+-------------------------------------------------------------------------------
+0000-1377 000-2FF 0000-0767 Unswitched-Erasable   Banks 0-2 of erasable memory
+1400-1777 300-3FF 0768-1023 Switched-Erasable     8 banks of 256 bytes each.
+2000-3777 400-7FF 1024-2047 Common-Fixed          36 banks of 1024 bytes each.
+4000-7777 800-FFF 2048-4096 Fixed-Fixed           Banks 2 and 3 of fixed memory
+
+
+Bank Select Registers
+=====================
+  The bank select registers are used select which of the switched memory banks
+are currently accessable.  Register EB is used to control which of the erasable
+memory banks can be accessed in the Switched-Erasable zone of memory, while 
+register FB is used to select which of the fixed memory banks is accessable in
+the Common-Fixed zone of memory.  The BB register contains both the erasable
+and fixed bank numbers and allows you to change (or read) both banks with a
+single instruction.  Any changes made to EB or FB will automatically be 
+mirrored in BB, while any changes made to BB will automatically be mirrored in
+the EB and FB registers.
+
+    Mapping In octal:
+    -----------------
+    EB register: 000 0EE E00 000 000   - Erasable bank register
+    FB register: FFF FF0 000 000 000   - Fixed bank register
+    BB Register: FFF FF0 000 000 EEE   - Both banks register
+
+    Mapping in hex:
+    ---------------
+    EB register: 000 0EEE 0000 0000   - Erasable bank register
+    FB register: FFF FF00 0000 0000   - Fixed bank register
+    BB Register: FFF FF00 0000 0EEE   - Both banks register
+
+For common fixed bank switching:
+FB: 00-23 - Unaffected by superbank bit
+    24-31 - Select banks 24 to 31 with superbank=0
+    24-27 - Select banks 32 to 35 with superbank=1
+
+
+I/O Ports
+=========
+Port 1 (octal)
+Duplicate of L register
+
+
+Port 2 (octal)
+Duplicate of Q register
+
+
+Port 3 (octal)
+HISCALAR - Incremented when LOSCALAR overflows
+
+
+Port 4 (octal)
+LOSCALAR - Incremented every 1/3200 sec.
+
+
+port 7 (octal)
+bit 7 - Superbank bit
+
+
+port 010 (octal)
+dsky display port output
+    aaa abcc cccd dddd
+
+    aaaa b ccccc ddddd
+    1011    M1    M2
+    1010    V1    V2
+    1001    N1    N2
+    1000          11
+    0111 1+ 12    13
+    0110 1- 14    15
+    0101 2+ 21    22
+    0100 2- 23    24
+    0011    25    31
+    0010 3+ 32    33
+    0001 3- 34    35
+    1100 bit 3 - Lights VEL indicator
+         bit 4 - Lights NO ATT indicator
+         bit 5 - Lights ALT indicator
+         bit 6 - Lights GIMBAL LOCK indicator
+         bit 8 - Lights TRACKER indicator
+         bit 9 - Lights PROG indicator
+
+  dsky value to number:
+    Value      Displayed
+    00000        Blank
+    10101          0
+    00011          1
+    11001          2 
+    11011          3
+    01111          4
+    11110          5
+    11100          6
+    10011          7
+    11101          8
+    11111          9
+
+
+port 011 (octal)
+dsky indicators port output
+    bit 2 - Lights COMP ACTY indicator
+    bit 3 - Lights UPLINK ACTY indicator
+    bit 4 - Lights TEMP indicator
+    bit 5 - Lights KEY REL indicator
+    bit 6 - Flash verb and noun numbers
+    bit 7 - Flash OPR ERR indicator
+
+
+port 13 (octal)
+    bit 15 = 1 - Enable TIME6
+    bit 15 = 0 - Disable TIME6
+    bit 11 = 1 - Light STBY indicator
+    bit 11 = 0 - Turn off STBY indicator
+    bit 10 = 1 - Turn on all lights, digits
+    bit 10 = 0 - Turn off test mode
+
+
+port 15 (octal)
+dsky kyb port input
+    Bits            Key
+    10000           0
+    00001           1
+    00010           2
+    00011           3
+    00100           4
+    00101           5
+    00110           6
+    00111           7
+    01000           8
+    01001           9
+    10001           Verb
+    10010           RSET
+    11001           KEY REL
+    11010           +
+    11011           -
+    11100           ENTR
+    11110           CLR
+    11111           Noun
+
+port 32 (octal)
+dsky PRO port input
+    bit 14 = 0 - PRO key pressed
+    bit 14 = 1 - PRO key not pressed
